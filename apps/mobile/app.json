@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Borrow Circle",
+    "slug": "borrow-circle",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "borrowcircle",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "in.borrowcircle.app"
+    },
+    "android": {
+      "package": "in.borrowcircle.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0F766E"
+      }
+    },
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [],
+    "extra": {}
+  }
+}

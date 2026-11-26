@@ -1,0 +1,29 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: borrow-circle-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-borrow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-borrow_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-borrow_circle}
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      # Docker Compose interpolates ${...} from the shell/root .env file.
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-borrow} -d ${POSTGRES_DB:-borrow_circle}']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    command:
+      # Local dev only: keep statements readable in logs.
+      - 'postgres'
+      - '-c'
+      - 'log_statement=ddl'
+
+volumes:
+  db_data:

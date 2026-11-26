@@ -1,0 +1,1073 @@
+// ---------------------------------------------------------------------------
+// Borrow Circle — Prisma schema (Phase 1)
+//
+// Conventions
+//  * All money is stored as integer **paise** (INR minor units). Never floats.
+//  * All timestamps are UTC. Calendar-day boundaries use @db.Date.
+//  * Sensitive identifiers are never stored in full:
+//      - Aadhaar: last 4 digits + HMAC hash + provider reference only.
+//      - PAN: last 4 digits + HMAC hash.
+//    Document images live in private storage and are encrypted at rest.
+//  * Append-only tables (ContractEvent, LedgerEntry, AuditLog) are never updated.
+//  * postgis geography lives on Listing.location and is indexed by
+//    prisma/sql/postgis.sql because Prisma cannot express GiST indexes.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+}
+
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum KycDocumentType {
+  AADHAAR
+  PAN
+  DRIVING_LICENCE
+}
+
+enum KycProvider {
+  MOCK
+  DIGILOCKER
+  DIGIO
+  SIGNZY
+  IDFY
+  KARZA
+}
+
+enum EsignProvider {
+  MOCK
+  EMUDHRA
+  DIGIO
+  LEEGALITY
+  NSDL
+}
+
+enum SignatureLevel {
+  E_CONSENT
+  AADHAAR_ESIGN
+}
+
+enum OtpPurpose {
+  LOGIN
+  PHONE_CHANGE
+}
+
+/// Purposes a user can give explicit consent for under the DPDP Act 2023.
+enum ConsentPurpose {
+  TERMS
+  PRIVACY
+  KYC_VERIFICATION
+  MARKETING
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  DELETED
+}
+
+enum ItemCondition {
+  NEW
+  LIKE_NEW
+  GOOD
+  FAIR
+  POOR
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+  EXPIRED
+}
+
+enum ContractStatus {
+  DRAFT
+  PENDING_SIGNATURES
+  ACTIVE
+  RENEWED
+  OVERDUE
+  NOTICE_SENT
+  DISPUTED
+  RECOVERY
+  LEGAL_ESCALATED
+  COMPLETED
+  CANCELLED
+  CLOSED
+}
+
+enum ContractPartyRole {
+  LENDER
+  BORROWER
+}
+
+enum ContractPhotoPhase {
+  PICKUP
+  RETURN
+}
+
+enum ContractEventType {
+  CREATED
+  TERMS_UPDATED
+  SENT_FOR_SIGNATURE
+  SIGNED
+  ACTIVATED
+  PICKUP_PHOTOS_ADDED
+  HANDOVER_CONFIRMED
+  RENEWAL_REQUESTED
+  RENEWAL_APPROVED
+  RENEWAL_FEE_PAID
+  DUE_REMINDER_SENT
+  OVERDUE
+  FINE_ACCRUED
+  RETURN_PHOTOS_ADDED
+  RETURN_CONFIRMED_NO_DAMAGE
+  DAMAGE_REPORTED
+  DISPUTE_RAISED
+  DISPUTE_RESOLVED
+  DEPOSIT_REFUNDED
+  DEPOSIT_FORFEITED
+  NOTICE_SENT
+  LEGAL_ESCALATED
+  COMPLETED
+  CANCELLED
+  CLOSED
+}
+
+enum RenewalStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PAID
+  CANCELLED
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_BORROWER
+  RESOLVED_LENDER
+  RESOLVED_SPLIT
+  WITHDRAWN
+}
+
+enum LedgerAccount {
+  USER_AVAILABLE
+  USER_HELD
+  PLATFORM_REVENUE
+  EXTERNAL_RAZORPAY
+  EXTERNAL_CASH
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum LedgerTxnKind {
+  TOP_UP
+  CONTRACT_RENT
+  DEPOSIT_HOLD
+  DEPOSIT_RELEASE
+  DEPOSIT_FORFEIT
+  FINE
+  RENEWAL_FEE
+  PLATFORM_FEE
+  WITHDRAWAL
+  CASH_SETTLEMENT
+  ADJUSTMENT
+}
+
+enum PaymentKind {
+  ADD_MONEY
+  RENT
+  DEPOSIT
+  FINE
+  RENEWAL_FEE
+  WITHDRAWAL
+}
+
+enum PaymentMethod {
+  UPI
+  CARD
+  NETBANKING
+  WALLET
+  CASH
+}
+
+enum PaymentProvider {
+  RAZORPAY
+  CASH
+  INTERNAL
+}
+
+enum PaymentStatus {
+  CREATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+enum FeedbackType {
+  BUG
+  SUGGESTION
+  COMPLAINT
+  OTHER
+}
+
+enum FeedbackStatus {
+  NEW
+  REVIEWED
+  PLANNED
+  DONE
+}
+
+enum NotificationType {
+  CONTRACT_UPDATE
+  CHAT_MESSAGE
+  OFFER
+  PAYMENT
+  REMINDER
+  KYC
+  DISPUTE
+  ANNOUNCEMENT
+  SYSTEM
+}
+
+enum ReportStatus {
+  OPEN
+  REVIEWED
+  ACTIONED
+  DISMISSED
+}
+
+enum EvidencePackStatus {
+  GENERATING
+  READY
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Identity, KYC, sessions
+// ---------------------------------------------------------------------------
+
+model User {
+  id                    String     @id @default(uuid()) @db.Uuid
+  phone                 String     @unique
+  phoneVerifiedAt       DateTime?
+  email                 String?    @unique
+  name                  String?
+  photoUrl              String?
+  addressLine           String?
+  city                  String?
+  state                 String?
+  pincode               String?
+  role                  UserRole   @default(USER)
+  status                UserStatus @default(ACTIVE)
+  kycStatus             KycStatus  @default(NOT_STARTED)
+  kycVerifiedAt         DateTime?
+  mfaEnabled            Boolean    @default(false)
+  /// AES-GCM encrypted TOTP secret. Never returned by the API.
+  mfaSecretEnc          String?
+  trustScore            Int        @default(100)
+  ratingAvg             Float      @default(0)
+  ratingCount           Int        @default(0)
+  completedRentalsCount Int        @default(0)
+  lastLoginAt           DateTime?
+  lastKnownLat          Float?
+  lastKnownLng          Float?
+  /// Set when the user asks for erasure; 30-day grace period before scrubbing.
+  deletionRequestedAt   DateTime?
+  /// Right-to-erasure marker; PII is scrubbed, financial records retained.
+  deletedAt             DateTime?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  kycDocuments        KycDocument[]       @relation("UserKycDocuments")
+  kycReviews          KycDocument[]       @relation("KycReviewer")
+  consents            ConsentRecord[]
+  devices             Device[]
+  refreshTokens       RefreshToken[]
+  listings            Listing[]           @relation("ListingOwner")
+  threadsAsBorrower   ChatThread[]        @relation("ThreadBorrower")
+  threadsAsLender     ChatThread[]        @relation("ThreadLender")
+  messages            Message[]
+  offersSent          Offer[]             @relation("OfferSender")
+  offersReceived      Offer[]             @relation("OfferReceiver")
+  contractsAsLender   Contract[]          @relation("ContractLender")
+  contractsAsBorrower Contract[]          @relation("ContractBorrower")
+  signatures          ContractSignature[]
+  contractEvents      ContractEvent[]     @relation("ContractEventActor")
+  contractPhotos      ContractPhoto[]
+  renewalsRequested   Renewal[]           @relation("RenewalRequester")
+  disputesRaised      Dispute[]           @relation("DisputeRaiser")
+  disputesResolved    Dispute[]           @relation("DisputeResolver")
+  wallet              Wallet?
+  payments            PaymentTransaction[]
+  reviewsWritten      Review[]            @relation("ReviewAuthor")
+  reviewsReceived     Review[]            @relation("ReviewSubject")
+  notifications       Notification[]
+  feedback            Feedback[]
+  announcements       Announcement[]      @relation("AnnouncementPublisher")
+  adminActions        AdminAction[]       @relation("AdminActor")
+  blocksInitiated     Block[]             @relation("Blocker")
+  blocksReceived      Block[]             @relation("Blocked")
+  reportsFiled        Report[]            @relation("Reporter")
+  reportsAgainst      Report[]            @relation("Reported")
+  evidencePacks       EvidencePack[]      @relation("EvidenceRequester")
+  blacklistEntries    BlacklistEntry[]
+  settingsUpdated     Setting[]           @relation("SettingUpdater")
+
+  @@index([city])
+  @@index([kycStatus])
+  @@index([status])
+}
+
+model Device {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  fingerprint String
+  platform    String?
+  appVersion  String?
+  pushToken   String?
+  isTrusted   Boolean   @default(true)
+  lastSeenAt  DateTime  @default(now())
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fingerprint])
+  @@index([pushToken])
+}
+
+/// Refresh-token rotation with reuse detection (familyId groups a login session).
+model RefreshToken {
+  id                 String    @id @default(uuid()) @db.Uuid
+  userId             String    @db.Uuid
+  familyId           String    @db.Uuid
+  tokenHash          String    @unique
+  deviceId           String?   @db.Uuid
+  ipAddress          String?
+  userAgent          String?
+  expiresAt          DateTime
+  usedAt             DateTime?
+  revokedAt          DateTime?
+  replacedByTokenHash String?
+  createdAt          DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+}
+
+/// One row per document type, per submission. Duplicate types keep history.
+model KycDocument {
+  id                String          @id @default(uuid()) @db.Uuid
+  userId            String          @db.Uuid
+  type              KycDocumentType
+  status            KycStatus       @default(PENDING)
+  provider          KycProvider     @default(MOCK)
+  providerReference String?
+  /// Last 4 only. The full number is never persisted.
+  numberLast4       String?
+  /// HMAC-SHA256 of the normalised number (for duplicate/fraud checks).
+  numberHash        String?
+  frontImageKey     String?
+  backImageKey      String?
+  selfieImageKey    String?
+  consentVersion    String?
+  consentAt         DateTime?
+  rejectionReason   String?
+  reviewedById      String?         @db.Uuid
+  reviewedAt        DateTime?
+  verifiedAt        DateTime?
+  /// Set when the retention job purges document images.
+  purgedAt          DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  user     User  @relation("UserKycDocuments", fields: [userId], references: [id], onDelete: Cascade)
+  reviewer User? @relation("KycReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([userId, type])
+  @@index([status, createdAt])
+  @@index([numberHash])
+}
+
+/// Short-lived OTP challenge. Only the HMAC of the code is stored, never the code.
+/// Keyed by phone (not userId) so first-time logins and pre-signup verification work.
+model OtpChallenge {
+  id          String     @id @default(uuid()) @db.Uuid
+  phone       String
+  codeHash    String
+  purpose     OtpPurpose @default(LOGIN)
+  attempts    Int        @default(0)
+  maxAttempts Int        @default(5)
+  requestIp   String?
+  sentAt      DateTime   @default(now())
+  expiresAt   DateTime
+  consumedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  @@index([phone, createdAt])
+  @@index([expiresAt])
+}
+
+/// Explicit, versioned consent evidence (DPDP Act 2023). Insert-only.
+model ConsentRecord {
+  id        String         @id @default(uuid()) @db.Uuid
+  userId    String         @db.Uuid
+  purpose   ConsentPurpose
+  version   String
+  granted   Boolean        @default(true)
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime       @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Listings & discovery
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(uuid()) @db.Uuid
+  slug      String   @unique
+  name      String
+  nameHi    String
+  icon      String?
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  listings Listing[]
+}
+
+model Listing {
+  id                    String        @id @default(uuid()) @db.Uuid
+  ownerId               String        @db.Uuid
+  categoryId            String        @db.Uuid
+  title                 String
+  description           String
+  condition             ItemCondition @default(GOOD)
+  /// Agreed replacement value, basis for e-sign threshold and disputes.
+  replacementValuePaise Int
+  /// 0 = lending for free.
+  rentPerDayPaise       Int
+  depositPaise          Int           @default(0)
+  lateFinePerDayPaise   Int           @default(0)
+  maxRentalDays         Int           @default(30)
+  pickupAddressLine     String?
+  city                  String
+  state                 String?
+  pincode               String?
+  latitude              Float
+  longitude             Float
+  /// PostGIS geography(Point,4326); written via raw SQL, indexed in postgis.sql.
+  location              Unsupported("geography(Point, 4326)")?
+  availabilityStart     DateTime?     @db.Date
+  availabilityEnd       DateTime?     @db.Date
+  status                ListingStatus @default(DRAFT)
+  viewCount             Int           @default(0)
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  deletedAt             DateTime?
+
+  owner     User           @relation("ListingOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  category  Category       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  photos    ListingPhoto[]
+  threads   ChatThread[]
+  offers    Offer[]
+  contracts Contract[]
+  reports   Report[]
+
+  @@index([ownerId])
+  @@index([categoryId, status])
+  @@index([status, city])
+  @@index([status, rentPerDayPaise])
+}
+
+model ListingPhoto {
+  id        String   @id @default(uuid()) @db.Uuid
+  listingId String   @db.Uuid
+  storageKey String
+  url       String?
+  sha256    String?
+  width     Int?
+  height    Int?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  listing Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+
+  @@index([listingId, sortOrder])
+}
+
+// ---------------------------------------------------------------------------
+// Chat & offers
+// ---------------------------------------------------------------------------
+
+model ChatThread {
+  id            String    @id @default(uuid()) @db.Uuid
+  listingId     String    @db.Uuid
+  borrowerId    String    @db.Uuid
+  lenderId      String    @db.Uuid
+  lastMessageAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  listing  Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  borrower User      @relation("ThreadBorrower", fields: [borrowerId], references: [id], onDelete: Cascade)
+  lender   User      @relation("ThreadLender", fields: [lenderId], references: [id], onDelete: Cascade)
+  messages Message[]
+  offers   Offer[]
+  contract Contract?
+
+  @@unique([listingId, borrowerId])
+  @@index([borrowerId, lastMessageAt])
+  @@index([lenderId, lastMessageAt])
+}
+
+model Message {
+  id        String    @id @default(uuid()) @db.Uuid
+  threadId  String    @db.Uuid
+  senderId  String    @db.Uuid
+  body      String?
+  imageKey  String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  thread ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender User       @relation(fields: [senderId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+  @@index([senderId])
+}
+
+model Offer {
+  id                 String      @id @default(uuid()) @db.Uuid
+  threadId           String      @db.Uuid
+  listingId          String      @db.Uuid
+  fromUserId         String      @db.Uuid
+  toUserId           String      @db.Uuid
+  rentPerDayPaise    Int
+  depositPaise       Int
+  rentalStartDate    DateTime    @db.Date
+  rentalEndDate      DateTime    @db.Date
+  status             OfferStatus @default(PENDING)
+  expiresAt          DateTime?
+  respondedAt        DateTime?
+  createdAt          DateTime    @default(now())
+
+  thread  ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  listing Listing    @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  fromUser User      @relation("OfferSender", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUser   User      @relation("OfferReceiver", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, status])
+  @@index([toUserId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Contracts, signatures, evidence
+// ---------------------------------------------------------------------------
+
+model Contract {
+  id                    String         @id @default(uuid()) @db.Uuid
+  /// Human-readable reference, e.g. BC-2026-000123.
+  code                  String         @unique
+  listingId             String         @db.Uuid
+  threadId              String?        @unique @db.Uuid
+  lenderId              String         @db.Uuid
+  borrowerId            String         @db.Uuid
+  status                ContractStatus @default(DRAFT)
+  version               Int            @default(1)
+  rentalStartDate       DateTime       @db.Date
+  rentalEndDate         DateTime       @db.Date
+  rentPerDayPaise       Int
+  rentTotalPaise        Int
+  depositPaise          Int
+  lateFinePerDayPaise   Int
+  replacementValuePaise Int
+  platformFeePaise      Int            @default(0)
+  renewalFeePaise       Int            @default(0)
+  signatureLevel        SignatureLevel @default(E_CONSENT)
+  termsVersion          String         @default("2026-11-v1")
+  governingLaw          String         @default("India")
+  jurisdictionCity      String?
+  pdfKey                String?
+  /// SHA-256 of the final signed PDF; anchored in the audit log.
+  pdfSha256             String?
+  signedAt              DateTime?
+  activatedAt           DateTime?
+  dueAt                 DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
+  overdueAt             DateTime?
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+
+  listing            Listing              @relation(fields: [listingId], references: [id], onDelete: Restrict)
+  thread             ChatThread?          @relation(fields: [threadId], references: [id], onDelete: SetNull)
+  lender             User                 @relation("ContractLender", fields: [lenderId], references: [id], onDelete: Restrict)
+  borrower           User                 @relation("ContractBorrower", fields: [borrowerId], references: [id], onDelete: Restrict)
+  versions           ContractVersion[]
+  signatures         ContractSignature[]
+  events             ContractEvent[]
+  photos             ContractPhoto[]
+  renewals           Renewal[]
+  disputes           Dispute[]
+  payments           PaymentTransaction[]
+  ledgerTransactions LedgerTransaction[]
+  evidencePacks      EvidencePack[]
+  legalNotices       LegalNotice[]
+  reviews            Review[]
+
+  @@index([lenderId, status])
+  @@index([borrowerId, status])
+  @@index([status, dueAt])
+}
+
+model ContractVersion {
+  id           String   @id @default(uuid()) @db.Uuid
+  contractId   String   @db.Uuid
+  version      Int
+  /// Immutable snapshot of all terms at this version.
+  snapshot     Json
+  sha256       String
+  createdById  String?  @db.Uuid
+  createdAt    DateTime @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@unique([contractId, version])
+}
+
+model ContractSignature {
+  id               String         @id @default(uuid()) @db.Uuid
+  contractId       String         @db.Uuid
+  userId           String         @db.Uuid
+  role             ContractPartyRole
+  level            SignatureLevel @default(E_CONSENT)
+  provider         EsignProvider  @default(MOCK)
+  signedAt         DateTime       @default(now())
+  otpVerifiedAt    DateTime?
+  ipAddress        String?
+  userAgent        String?
+  deviceId         String?        @db.Uuid
+  signatureImageKey String?
+  signatureSha256  String?
+  certificateKey   String?
+  documentSha256   String?
+  esignRef         String?
+  createdAt        DateTime       @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@unique([contractId, userId])
+  @@index([userId])
+}
+
+/// Append-only contract audit trail. Never update or delete rows.
+model ContractEvent {
+  id         String            @id @default(uuid()) @db.Uuid
+  contractId String            @db.Uuid
+  type       ContractEventType
+  actorId    String?           @db.Uuid
+  payload    Json?
+  ipAddress  String?
+  createdAt  DateTime          @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  actor    User?    @relation("ContractEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([contractId, createdAt])
+  @@index([type, createdAt])
+}
+
+model ContractPhoto {
+  id           String              @id @default(uuid()) @db.Uuid
+  contractId   String              @db.Uuid
+  phase        ContractPhotoPhase
+  storageKey   String
+  /// Hash of the original upload, for tamper evidence.
+  sha256       String
+  capturedAt   DateTime
+  latitude     Float?
+  longitude    Float?
+  gpsAccuracyM Float?
+  uploadedById String              @db.Uuid
+  createdAt    DateTime            @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  uploadedBy User   @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@index([contractId, phase])
+}
+
+model Renewal {
+  id              String        @id @default(uuid()) @db.Uuid
+  contractId      String        @db.Uuid
+  requestedById   String        @db.Uuid
+  previousEndDate DateTime      @db.Date
+  newEndDate      DateTime      @db.Date
+  feePaise        Int           @default(0)
+  status          RenewalStatus @default(REQUESTED)
+  approverId      String?       @db.Uuid
+  decidedAt       DateTime?
+  createdAt       DateTime      @default(now())
+
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  requestedBy User     @relation("RenewalRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@index([contractId, status])
+}
+
+model Dispute {
+  id                String        @id @default(uuid()) @db.Uuid
+  contractId        String        @db.Uuid
+  raisedById        String        @db.Uuid
+  reason            String
+  description       String
+  claimedAmountPaise Int          @default(0)
+  evidenceNote      String?
+  status            DisputeStatus @default(OPEN)
+  resolvedById      String?       @db.Uuid
+  resolutionNote    String?
+  resolvedAt        DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  raisedBy User     @relation("DisputeRaiser", fields: [raisedById], references: [id], onDelete: Restrict)
+  resolvedBy User?  @relation("DisputeResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([contractId])
+  @@index([status, createdAt])
+}
+
+model EvidencePack {
+  id               String             @id @default(uuid()) @db.Uuid
+  contractId       String             @db.Uuid
+  requestedById    String             @db.Uuid
+  status           EvidencePackStatus @default(GENERATING)
+  pdfKey           String?
+  zipKey           String?
+  sha256           String?
+  generatedAt      DateTime?
+  legalRequestRef  String?
+  note             String?
+  createdAt        DateTime           @default(now())
+
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  requestedBy User     @relation("EvidenceRequester", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@index([contractId, createdAt])
+}
+
+model LegalNotice {
+  id              String    @id @default(uuid()) @db.Uuid
+  contractId      String    @db.Uuid
+  stage           String
+  channel         String
+  deadlineAt      DateTime?
+  sentAt          DateTime?
+  templateVersion String
+  contentHash     String?
+  deliveryRef     String?
+  createdAt       DateTime  @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+
+  @@index([contractId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Wallet & payments (ledger is the source of truth; balances are caches)
+// ---------------------------------------------------------------------------
+
+model Wallet {
+  id             String   @id @default(uuid()) @db.Uuid
+  userId         String   @unique @db.Uuid
+  currency       String   @default("INR")
+  /// Cached projections, recomputable from LedgerEntry.
+  availablePaise Int      @default(0)
+  heldPaise      Int      @default(0)
+  version        Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user    User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  entries LedgerEntry[]
+}
+
+/// A balanced group of LedgerEntry rows (sum of debits == sum of credits).
+model LedgerTransaction {
+  id             String        @id @default(uuid()) @db.Uuid
+  kind           LedgerTxnKind
+  contractId     String?       @db.Uuid
+  idempotencyKey String        @unique
+  description    String?
+  metadata       Json?
+  postedAt       DateTime      @default(now())
+  createdAt      DateTime      @default(now())
+
+  contract Contract?           @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  entries  LedgerEntry[]
+  payment  PaymentTransaction?
+
+  @@index([contractId])
+  @@index([kind, postedAt])
+}
+
+/// Append-only double-entry line. Amounts are always positive; direction sets sign.
+model LedgerEntry {
+  id            String         @id @default(uuid()) @db.Uuid
+  transactionId String         @db.Uuid
+  walletId      String?        @db.Uuid
+  account       LedgerAccount
+  direction     LedgerDirection
+  amountPaise   Int
+  memo          String?
+  createdAt     DateTime       @default(now())
+
+  transaction LedgerTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  wallet      Wallet?            @relation(fields: [walletId], references: [id], onDelete: Restrict)
+
+  @@index([walletId, createdAt])
+  @@index([account, createdAt])
+}
+
+model PaymentTransaction {
+  id                  String          @id @default(uuid()) @db.Uuid
+  userId              String          @db.Uuid
+  contractId          String?         @db.Uuid
+  ledgerTransactionId String?         @unique @db.Uuid
+  kind                PaymentKind
+  method              PaymentMethod
+  provider            PaymentProvider
+  amountPaise         Int
+  status              PaymentStatus   @default(CREATED)
+  providerOrderId     String?
+  providerPaymentId   String?         @unique
+  idempotencyKey      String          @unique
+  failureReason       String?
+  /// Cash rent is confirmed by both parties; deposits must never use cash.
+  cashConfirmedByBorrowerAt DateTime?
+  cashConfirmedByLenderAt   DateTime?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+
+  user              User               @relation(fields: [userId], references: [id], onDelete: Restrict)
+  contract          Contract?          @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  ledgerTransaction LedgerTransaction? @relation(fields: [ledgerTransactionId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([contractId])
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Trust, communication, admin
+// ---------------------------------------------------------------------------
+
+model Review {
+  id         String   @id @default(uuid()) @db.Uuid
+  contractId String   @db.Uuid
+  authorId   String   @db.Uuid
+  subjectId  String   @db.Uuid
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  author   User     @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  subject  User     @relation("ReviewSubject", fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([contractId, authorId])
+  @@index([subjectId, createdAt])
+}
+
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  type      NotificationType
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+model Feedback {
+  id             String         @id @default(uuid()) @db.Uuid
+  userId         String?        @db.Uuid
+  rating         Int?
+  type           FeedbackType
+  message        String
+  screenshotKey  String?
+  status         FeedbackStatus @default(NEW)
+  adminReply     String?
+  repliedAt      DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+}
+
+model Announcement {
+  id            String   @id @default(uuid()) @db.Uuid
+  title         String
+  body          String
+  publishedById String?  @db.Uuid
+  isActive      Boolean  @default(true)
+  publishedAt   DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  publishedBy User? @relation("AnnouncementPublisher", fields: [publishedById], references: [id], onDelete: SetNull)
+
+  @@index([isActive, publishedAt])
+}
+
+model AdminAction {
+  id         String   @id @default(uuid()) @db.Uuid
+  adminId    String   @db.Uuid
+  action     String
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  admin User @relation("AdminActor", fields: [adminId], references: [id], onDelete: Restrict)
+
+  @@index([adminId, createdAt])
+  @@index([targetType, targetId])
+}
+
+model Setting {
+  key         String   @id
+  value       Json
+  description String?
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt
+
+  updatedBy User? @relation("SettingUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/// Hash-chained audit log. hash = SHA-256(prevHash + canonical payload).
+/// Insert-only: enforced by DB permissions in production, never by app updates.
+model AuditLog {
+  seq        BigInt   @id @default(autoincrement())
+  prevHash   String?
+  hash       String
+  actorType  String?
+  actorId    String?
+  action     String
+  entityType String?
+  entityId   String?
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model BlacklistEntry {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String?   @db.Uuid
+  phoneHash         String?
+  aadhaarHash       String?
+  panHash           String?
+  deviceFingerprint String?
+  reason            String
+  severity          Int       @default(1)
+  notes             String?
+  createdById       String?   @db.Uuid
+  createdAt         DateTime  @default(now())
+  expiresAt         DateTime?
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([phoneHash])
+  @@index([aadhaarHash])
+  @@index([deviceFingerprint])
+}
+
+model Block {
+  id        String   @id @default(uuid()) @db.Uuid
+  blockerId String   @db.Uuid
+  blockedId String   @db.Uuid
+  createdAt DateTime @default(now())
+
+  blocker User @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked User @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+model Report {
+  id             String       @id @default(uuid()) @db.Uuid
+  reporterId     String       @db.Uuid
+  reportedUserId String       @db.Uuid
+  listingId      String?      @db.Uuid
+  contractId     String?      @db.Uuid
+  reason         String
+  details        String?
+  status         ReportStatus @default(OPEN)
+  resolvedById   String?      @db.Uuid
+  resolvedAt     DateTime?
+  createdAt      DateTime     @default(now())
+
+  reporter     User    @relation("Reporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedUser User    @relation("Reported", fields: [reportedUserId], references: [id], onDelete: Cascade)
+  listing      Listing? @relation(fields: [listingId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@index([reportedUserId])
+}

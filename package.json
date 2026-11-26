@@ -1,0 +1,55 @@
+{
+  "name": "borrow-circle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Borrow Circle — peer-to-peer equipment lending and borrowing for India",
+  "license": "UNLICENSED",
+  "workspaces": [
+    "server",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "npm run dev -w @borrow-circle/server",
+    "dev:server": "npm run dev -w @borrow-circle/server",
+    "dev:admin": "npm run dev -w @borrow-circle/admin",
+    "dev:mobile": "npm run start -w @borrow-circle/mobile",
+    "build": "npm run build -w @borrow-circle/server && npm run build -w @borrow-circle/admin",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d db",
+    "db:migrate": "npm run db:migrate -w @borrow-circle/server",
+    "db:generate": "npm run db:generate -w @borrow-circle/server",
+    "db:studio": "npm run db:studio -w @borrow-circle/server",
+    "postgis:index": "npm run postgis:index -w @borrow-circle/server"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "baseline-browser-mapping": "^2.11.39",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "globals": "^15.14.0",
+    "jsesc": "^3.1.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1"
+  },
+  "allowScripts": {
+    "prisma": true,
+    "@prisma/client@6.19.3": true,
+    "@prisma/engines@6.19.3": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  },
+  "dependencies": {
+    "@prisma/config": "^6.19.3",
+    "@prisma/engines": "^6.19.3"
+  }
+}
